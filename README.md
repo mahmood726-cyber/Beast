@@ -97,7 +97,15 @@ The append path (`beast/pairwise70_repo.py`) is the safety boundary:
   **no file is ever deleted**; the original 595 are treated as immutable.
 - **Idempotent** — re-running an update adds nothing; the manifest survives across
   processes so dedupe is durable.
-- **Isolated** — one failing or no-data review never aborts the batch.
+- **Concurrency-safe** — the claim→write→record step runs under an inter-process
+  lock, and both the manifest read and its atomic replace retry through the
+  transient Windows sharing-violations a concurrent peer causes, so two
+  overlapping runs (e.g. `beast loop` + a cron `beast run`) can never lose-update
+  the ledger or drop a real addition. A lock left by a crashed process is
+  reclaimed once stale. A corrupt/unreadable manifest **fails closed** (never
+  silently reset, which would risk re-appending).
+- **Isolated** — one failing or no-data review (extraction *or* write error)
+  never aborts the batch.
 
 This was verified against a copy of the **real 595-file** dataset: feeding a mix
 of existing + new reviews appended only the new ones, left all 595 originals
@@ -153,11 +161,13 @@ beast/
     base.py          Source ABC + TopicSpec (fail-closed contract).
     pairwise70.py    Offline real Cochrane data (CSV or .rda), as_of_year cumulative.
     europepmc.py     Live PubMed/Europe PMC search (RCTs); abstract effect parser.
+    rct_extractor.py Corpus of abstracts -> trials via the rct-extractor-v2 engine
+                     (17 specialties); engine imported lazily, fail-closed.
   ingest/
     base.py          CochraneFeed + StudyExtractor ABCs, ReviewRef, DOI->id.
     cochrane.py      Crossref CDSR feed + ProcessExtractor (reuses the real
                      cochrane-data-extractor pipeline). Both mockable.
-tests/               88 offline tests (synthetic + real sample vs metafor gold;
+tests/               109 offline tests (synthetic + real sample vs metafor gold;
                      updater safety vs the real 595-file structure).
 ```
 
@@ -178,6 +188,16 @@ store.add_snapshot (idempotent) → diff_snapshots → store.add_changes → rep
   stated. For rigorous full-text extraction, plug in
   [rct-extractor-v2](https://github.com/mahmood726-cyber/rct-extractor-v2). Needs
   `requests`; fail-closed on transport/payload errors.
+- **`rct_extractor`** *(corpus, via the rct-extractor-v2 engine)* — extracts
+  poolable trial effects from a corpus of abstracts (a JSON list of
+  `{study, text, year?}` or a folder of `*.txt`) across 17 disease specialties,
+  using the pip-installable
+  [rct-extractor-v2](https://github.com/mahmood726-cyber/rct-extractor-v2) engine
+  (`pip install "git+https://github.com/mahmood726-cyber/rct-extractor-v2.git"`).
+  The engine is imported lazily — Beast does not hard-depend on it — and the
+  source is fail-closed (raises if the engine is missing, the corpus is empty, or
+  no poolable trial is produced). Supports `as_of_year`. Example:
+  `--source rct_extractor --params '{"corpus":"abstracts/","specialty":"diabetes"}'`.
 
 ---
 
@@ -325,7 +345,7 @@ standard guidance.
 
 ```bash
 pip install pytest
-python -m pytest            # 88 tests, fully offline, ~5s
+python -m pytest            # 109 tests, fully offline, ~5s
 ```
 
 ---

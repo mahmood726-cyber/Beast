@@ -78,6 +78,15 @@ def test_process_extractor_parses_cochrane_data_rows(tmp_path):
     assert trials[0].e_events == 5 and trials[0].c_n == 100
 
 
+def test_process_extractor_requires_out_placeholder():
+    # A template that never writes to {out} would silently yield no-data for every
+    # review; fail fast instead.
+    with pytest.raises(ValueError):
+        ProcessExtractor(["python", "extract.py", "--doi", "{doi}"])
+    with pytest.raises(ValueError):
+        ProcessExtractor([])
+
+
 def test_process_extractor_no_data_raises(tmp_path):
     from beast.ingest.base import NoDataError
     # Command that writes nothing -> NoDataError.

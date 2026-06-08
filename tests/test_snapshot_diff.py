@@ -99,6 +99,15 @@ def test_direction_flip_is_major():
     assert any(c.type == "direction_flip" and c.severity == "major" for c in diff.changes)
 
 
+def test_direction_flip_gated_by_magnitude():
+    # A sign change while hovering on the null (OR ~0.98 -> ~1.02) is noise, not a
+    # real reversal -- it must NOT raise a spurious "major" alert.
+    prev = _snap(estimate=-0.02, natural={"estimate": 0.98, "ci_low": 0.9, "ci_high": 1.07})
+    curr = _snap(estimate=0.02, natural={"estimate": 1.02, "ci_low": 0.93, "ci_high": 1.11})
+    diff = diff_snapshots(prev, curr)
+    assert not any(c.type == "direction_flip" for c in diff.changes)
+
+
 def test_heterogeneity_change_flagged():
     prev = _snap(i2=10.0, tau2=0.01)
     curr = _snap(i2=55.0, tau2=0.08)

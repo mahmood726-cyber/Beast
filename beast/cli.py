@@ -285,7 +285,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("add", help="add/update a tracked topic"); sp.set_defaults(func=cmd_add)
     sp.add_argument("--id", required=True); sp.add_argument("--title", required=True)
-    sp.add_argument("--source", required=True, choices=["pairwise70", "europepmc"])
+    sp.add_argument("--source", required=True, choices=["pairwise70", "europepmc", "rct_extractor"])
     sp.add_argument("--measure", default="OR", choices=["OR", "RR", "MD", "SMD", "GEN"])
     sp.add_argument("--method", default="REML", choices=["REML", "PM", "DL"])
     sp.add_argument("--params", help="JSON params, e.g. '{\"csv\":\"data.csv\"}'")

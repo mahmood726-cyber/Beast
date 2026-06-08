@@ -105,6 +105,30 @@ def test_update_handles_no_data_and_failures(repo):
     assert not repo.has("CD900012_pub1")
 
 
+def test_update_isolates_add_dataset_errors(repo, monkeypatch):
+    """A write/ledger error on one review must not abort the batch (isolation)."""
+    refs = [
+        ReviewRef.from_doi("10.1002/14651858.CD900040.pub1"),  # ok
+        ReviewRef.from_doi("10.1002/14651858.CD900041.pub1"),  # add_dataset blows up
+        ReviewRef.from_doi("10.1002/14651858.CD900042.pub1"),  # ok again
+    ]
+    real_add = repo.add_dataset
+
+    def flaky_add(review_id, *a, **kw):
+        if review_id == "CD900041_pub1":
+            raise OSError("disk full")
+        return real_add(review_id, *a, **kw)
+
+    monkeypatch.setattr(repo, "add_dataset", flaky_add)
+    report = update_pairwise70(repo, MockFeed(refs),
+                               CallableExtractor(lambda r: _trials(seed=r.id)), timestamp="t")
+    assert report.n_added == 2          # the two healthy reviews still landed
+    assert report.n_failed == 1         # the failing one was recorded, not raised
+    assert "CD900040_pub1" in report.added_ids
+    assert "CD900042_pub1" in report.added_ids
+    assert not repo.has("CD900041_pub1")
+
+
 def test_update_respects_limit(repo):
     refs = [ReviewRef.from_doi(f"10.1002/14651858.CD90010{i}.pub1") for i in range(5)]
     report = update_pairwise70(repo, MockFeed(refs),

@@ -74,6 +74,7 @@ def get_source(name: str, **kwargs) -> Source:
     # the corresponding source is actually used.
     import beast.sources.pairwise70  # noqa: F401
     import beast.sources.europepmc  # noqa: F401
+    import beast.sources.rct_extractor  # noqa: F401
 
     if name not in _REGISTRY:
         raise ValueError(f"unknown source {name!r}; available: {sorted(_REGISTRY)}")

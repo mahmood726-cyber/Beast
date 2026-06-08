@@ -124,9 +124,14 @@ def diff_snapshots(
 
     # --- direction (crossing the null) --------------------------------
     # Null is 0 on the analysis scale. A sign change means the pooled direction
-    # of benefit/harm reversed -- always major.
+    # of benefit/harm reversed -- always major. But gate it by magnitude: an
+    # estimate hovering on the null flips sign on pure noise (e.g. OR 0.999 ->
+    # 1.001), which is not a meaningful reversal. Require at least one side to be
+    # an appreciable distance from the null (the same effect_shift threshold)
+    # before calling it a direction flip.
     if prev.estimate != 0 and curr.estimate != 0 and \
-            math.copysign(1, prev.estimate) != math.copysign(1, curr.estimate):
+            math.copysign(1, prev.estimate) != math.copysign(1, curr.estimate) and \
+            max(abs(prev.estimate), abs(curr.estimate)) >= th.effect_shift:
         diff.changes.append(Change(
             type="direction_flip",
             severity="major",

@@ -103,10 +103,17 @@ def update_pairwise70(
             report.results.append(ReviewUpdate(ref.id, "failed", error=str(exc)))
             log.warning("update [%s]: extraction failed: %s", ref.id, exc)
             continue
-        res = repo.add_dataset(
-            ref.id, trials, doi=ref.doi, title=ref.title, pub_date=ref.pub_date,
-            measure=ref.measure, added_at=timestamp,
-        )
+        try:
+            res = repo.add_dataset(
+                ref.id, trials, doi=ref.doi, title=ref.title, pub_date=ref.pub_date,
+                measure=ref.measure, added_at=timestamp,
+            )
+        except Exception as exc:  # noqa: BLE001 - a write/ledger error on one review
+            # (disk full, permission, lock timeout, corrupt manifest) must not abort
+            # the whole batch; record it and move on.
+            report.results.append(ReviewUpdate(ref.id, "failed", error=str(exc)))
+            log.warning("update [%s]: append failed: %s", ref.id, exc)
+            continue
         status = "failed" if res.status == "error" else res.status
         report.results.append(ReviewUpdate(ref.id, status, n_studies=res.n_studies,
                                            error=res.error))

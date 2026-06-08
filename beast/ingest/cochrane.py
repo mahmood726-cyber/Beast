@@ -128,6 +128,14 @@ class ProcessExtractor(StudyExtractor):
 
     def __init__(self, command_template: list[str], cwd: Optional[str] = None,
                  timeout: int = 600):
+        if not command_template:
+            raise ValueError("ProcessExtractor needs a non-empty command_template")
+        if not any("{out}" in a for a in command_template):
+            raise ValueError(
+                "ProcessExtractor command_template must reference the {out} "
+                "placeholder so the extractor knows where to write its data-rows "
+                f"CSV; got {command_template!r}"
+            )
         self.command_template = command_template
         self.cwd = cwd
         self.timeout = timeout

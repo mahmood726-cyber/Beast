@@ -29,18 +29,109 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 from beast.effects import Trial
 
 MANIFEST_NAME = "beast_manifest.json"
+LOCK_NAME = MANIFEST_NAME + ".lock"
 # Tidy data-rows columns Beast writes for an appended dataset.
 CSV_COLUMNS = [
     "study", "year", "e_events", "e_n", "c_events", "c_n",
     "e_mean", "e_sd", "c_mean", "c_sd", "yi", "sei",
     "review_id", "review_doi", "measure",
 ]
+
+
+class ManifestError(RuntimeError):
+    """Raised when the append ledger is unreadable/corrupt.
+
+    Fail closed: we never silently treat a corrupt manifest as empty, because
+    that would throw away the dedupe ledger and risk re-appending datasets that
+    are already present (a duplicate-content leak under a different id).
+    """
+
+
+class _FileLock:
+    """A small cross-platform inter-process lock (exclusive-create lockfile).
+
+    Beast may run as a persistent ``loop`` process *and* under cron at the same
+    time, both auto-updating the same Pairwise70 working copy. Without a lock the
+    manifest is a read-modify-write across processes and one writer can silently
+    clobber another's just-added entry (a lost update), which would drop a real
+    addition out of the durable dedupe ledger. This lock serialises the whole
+    claim+write+record step so the ledger stays correct and durable.
+
+    Acquisition is bounded; a lockfile left behind by a crashed process is
+    reclaimed once it is older than ``stale_after`` so a crash never deadlocks
+    future runs.
+    """
+
+    def __init__(self, path: str, timeout: float = 60.0, poll: float = 0.05,
+                 stale_after: float = 900.0):
+        self.path = path
+        self.timeout = timeout
+        self.poll = poll
+        self.stale_after = stale_after
+        self._fd: Optional[int] = None
+
+    def acquire(self) -> None:
+        start = time.monotonic()
+        while True:
+            try:
+                self._fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                try:
+                    os.write(self._fd, str(os.getpid()).encode("ascii"))
+                except OSError:
+                    pass
+                return
+            except FileExistsError:
+                contended = True
+            except PermissionError:
+                # Windows returns ACCESS_DENIED (not FileExistsError) when the
+                # lockfile is held *or* in a pending-delete state during another
+                # holder's release. Treat it as contention and retry, never as a
+                # hard failure that would abort an update.
+                contended = True
+            if contended:
+                # Reclaim a stale lock left by a crashed/killed process.
+                try:
+                    age = time.time() - os.path.getmtime(self.path)
+                except OSError:
+                    age = 0.0
+                if age > self.stale_after:
+                    try:
+                        os.unlink(self.path)
+                    except OSError:
+                        pass
+                    continue
+                if time.monotonic() - start > self.timeout:
+                    raise TimeoutError(
+                        f"could not acquire {self.path} within {self.timeout}s "
+                        f"(another Beast update may be running)"
+                    )
+                time.sleep(self.poll)
+
+    def release(self) -> None:
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+
+    def __enter__(self) -> "_FileLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.release()
 
 
 def review_id_from_stem(stem: str) -> str:
@@ -91,6 +182,7 @@ class Pairwise70Repo:
         self.data_dir = os.path.join(self.root, "data")
         self.csv_dir = os.path.join(self.root, "data-raw", "beast")
         self.manifest_path = os.path.join(self.root, MANIFEST_NAME)
+        self.lock_path = os.path.join(self.root, LOCK_NAME)
         self.rscript = rscript
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.csv_dir, exist_ok=True)
@@ -108,8 +200,41 @@ class Pairwise70Repo:
 
     def _load_manifest(self) -> dict:
         if os.path.exists(self.manifest_path):
-            with open(self.manifest_path, encoding="utf-8") as fh:
-                return json.load(fh)
+            # A concurrent writer's atomic os.replace makes the target briefly
+            # inaccessible on Windows (PermissionError); that is NOT corruption,
+            # so retry the read before judging. Genuine corruption (bad JSON /
+            # wrong structure) still fails closed as a ManifestError.
+            raw = None
+            last_err: Optional[Exception] = None
+            for attempt in range(20):
+                try:
+                    with open(self.manifest_path, encoding="utf-8") as fh:
+                        raw = fh.read()
+                    break
+                except PermissionError as exc:  # transient sharing violation
+                    last_err = exc
+                    time.sleep(0.05)
+            if raw is None:
+                raise ManifestError(
+                    f"Pairwise70 manifest at {self.manifest_path} stayed unreadable "
+                    f"across retries ({last_err}); refusing to proceed so the dedupe "
+                    f"ledger is never silently lost."
+                ) from last_err
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise ManifestError(
+                    f"Pairwise70 manifest at {self.manifest_path} is corrupt "
+                    f"({exc}); refusing to proceed so the dedupe ledger is never "
+                    f"silently lost. Inspect or restore it, then re-run."
+                ) from exc
+            if not isinstance(data, dict) or not isinstance(data.get("added"), list):
+                raise ManifestError(
+                    f"Pairwise70 manifest at {self.manifest_path} has an unexpected "
+                    f"structure (expected a JSON object with an 'added' list); "
+                    f"refusing to proceed."
+                )
+            return data
         return {
             "managed_by": "Beast living updater (https://github.com/mahmood726-cyber/Beast)",
             "dataset": "Pairwise70",
@@ -169,9 +294,28 @@ class Pairwise70Repo:
         # that DOES replace the manifest only (never a dataset file).
         d = os.path.dirname(self.manifest_path)
         fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(self._manifest, fh, indent=2)
-        os.replace(tmp, self.manifest_path)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(self._manifest, fh, indent=2)
+            # Writes are serialised by the lock, but a *reader* in another
+            # process (e.g. a peer's __init__) can briefly hold the manifest
+            # open. On Windows os.replace then raises a sharing violation
+            # (WinError 5/32); retry briefly so a concurrent reader never costs
+            # us a real addition (the lost-update we are guarding against).
+            for attempt in range(20):
+                try:
+                    os.replace(tmp, self.manifest_path)
+                    return
+                except PermissionError:
+                    if attempt == 19:
+                        raise
+                    time.sleep(0.05)
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
     def _try_build_rda(self, csv_path: str, rda_path: str, object_name: str) -> Optional[str]:
         """Best-effort CSV -> .rda using Rscript (faithful to create_rda_files.R).
@@ -209,35 +353,41 @@ class Pairwise70Repo:
         """
         if not trials:
             return AddResult(review_id, "error", error="no study rows to add")
-        if self.has(review_id):
-            return AddResult(review_id, "skipped_exists", n_studies=len(trials))
 
         rows = _trial_rows(trials, review_id, doi, measure)
         sha = content_sha256(rows)
-        if sha in self.manifest_shas:
-            return AddResult(review_id, "skipped_dup_content", n_studies=len(trials))
-
         object_name = f"{review_id}_data"
         csv_path = os.path.join(self.csv_dir, f"{object_name}.csv")
         rda_path = os.path.join(self.data_dir, f"{object_name}.rda")
-        try:
-            self._write_csv(csv_path, rows)
-        except FileExistsError:
-            # A file is on disk but not in our ledger -> treat as pre-existing,
-            # do not clobber.
-            return AddResult(review_id, "skipped_exists", n_studies=len(trials))
 
-        built = self._try_build_rda(csv_path, rda_path, object_name)
+        # The whole claim->write->record step runs under an inter-process lock so a
+        # concurrent updater (e.g. `beast loop` overlapping a cron `beast run`)
+        # cannot lost-update the manifest. We re-read the ledger *inside* the lock
+        # so dedupe sees any peer's additions and stays durable across processes.
+        with _FileLock(self.lock_path):
+            self._manifest = self._load_manifest()
+            if self.has(review_id):
+                return AddResult(review_id, "skipped_exists", n_studies=len(trials))
+            if sha in self.manifest_shas:
+                return AddResult(review_id, "skipped_dup_content", n_studies=len(trials))
+            try:
+                self._write_csv(csv_path, rows)
+            except FileExistsError:
+                # A file is on disk but not in our ledger -> treat as pre-existing,
+                # do not clobber.
+                return AddResult(review_id, "skipped_exists", n_studies=len(trials))
 
-        entry = {
-            "review_id": review_id, "doi": doi, "title": title, "pub_date": pub_date,
-            "measure": measure, "n_studies": len(trials),
-            "csv": os.path.relpath(csv_path, self.root).replace(os.sep, "/"),
-            "rda": (os.path.relpath(built, self.root).replace(os.sep, "/") if built else None),
-            "content_sha256": sha, "added_at": added_at,
-        }
-        self._manifest["added"].append(entry)
-        self._save_manifest()
+            built = self._try_build_rda(csv_path, rda_path, object_name)
+
+            entry = {
+                "review_id": review_id, "doi": doi, "title": title, "pub_date": pub_date,
+                "measure": measure, "n_studies": len(trials),
+                "csv": os.path.relpath(csv_path, self.root).replace(os.sep, "/"),
+                "rda": (os.path.relpath(built, self.root).replace(os.sep, "/") if built else None),
+                "content_sha256": sha, "added_at": added_at,
+            }
+            self._manifest["added"].append(entry)
+            self._save_manifest()
         return AddResult(review_id, "added", n_studies=len(trials),
                          csv_path=csv_path, rda_path=built)
 
