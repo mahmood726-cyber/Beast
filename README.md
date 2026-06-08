@@ -1,15 +1,21 @@
-# Beast — living meta-analysis surveillance
+# Beast — living updater of Pairwise70 + meta-analysis surveillance
 
-**Beast is a self-running Python app that tracks how meta-analysis evidence
-changes over time.** For each topic you tell it to watch, it periodically
-re-fetches the trial set, recomputes a random-effects pooled estimate, stores a
-timestamped snapshot, and **flags meaningful changes** versus the last snapshot —
-an effect-size shift, a significance flip, new trials, or a change in
-heterogeneity. It is "living" surveillance of how the conclusion on a topic
-shifts as new evidence accumulates.
+**Beast is a self-running Python app that (1) keeps the
+[Pairwise70](https://github.com/mahmood726-cyber/Pairwise70) Cochrane dataset
+continuously growing with newly-published meta-analyses, and (2) tracks how the
+pooled evidence on tracked topics changes over time.**
 
-The random-effects engine is validated against R's `metafor` (see
-[Validation](#validation)).
+On each run Beast first **auto-updates Pairwise70** — it asks what Cochrane
+reviews are currently published, keeps only the ones not already in the dataset,
+extracts their study-level data, and **appends them** (append-only, no
+duplicates, no clobber). Then it does the **trend-tracking** on top: re-pools each
+tracked topic, stores a timestamped snapshot, and **flags meaningful changes**
+versus the last snapshot — an effect-size shift, a significance flip, new trials,
+or a change in heterogeneity.
+
+So Beast = **a living updater of Pairwise70 + a trend tracker**. The
+dataset-updating is the primary, reliable, idempotent core; the random-effects
+engine is validated against R's `metafor` (see [Validation](#validation)).
 
 ---
 
@@ -58,6 +64,70 @@ transition. No fabricated data; it is the real CD000028 evidence replayed by yea
 
 ---
 
+## Auto-updating Pairwise70 (the primary core)
+
+Beast keeps the Pairwise70 dataset current. The update step is:
+
+1. **Discover** — list currently-published Cochrane reviews via the Crossref REST
+   API (CDSR journal ISSN `1469-493X`) — DOIs, titles, publication dates. Pass
+   `--since YYYY-MM-DD` to only consider recent ones.
+2. **Dedupe** — keep only review ids not already in the dataset. Existing ids are
+   derived from the original `data/*.rda` filenames (the 595) **plus** Beast's own
+   append ledger (`beast_manifest.json`). Anything already present is skipped
+   *before* any extraction.
+3. **Extract** — for each genuinely-new review, run the existing
+   [cochrane-data-extractor](https://github.com/mahmood726-cyber/cochrane-data-extractor)
+   pipeline (a configurable command) to produce its study-level *data-rows* CSV,
+   then parse it into trials. Reviews with no pairwise data are recorded as
+   `no_data` — never fabricated.
+4. **Append** — write a new tidy CSV (`data-raw/beast/<id>_data.csv`) and, if R is
+   available, a matching `data/<id>_data.rda` (faithful to `create_rda_files.R`),
+   and record the addition in `beast_manifest.json`.
+5. **Commit/push** *(optional)* — stage **only** the files Beast added, commit, and
+   push to the Pairwise70 repo (fast-forward).
+
+### Safety guarantees (all tested)
+
+The append path (`beast/pairwise70_repo.py`) is the safety boundary:
+
+- **No duplicates** — an id already present is skipped; identical study-level
+  content (SHA-256) is skipped even under a different id.
+- **No clobber / no data loss** — an existing target file is **never** overwritten
+  (writes go to a temp file then atomic-rename; aborts if the target appeared);
+  **no file is ever deleted**; the original 595 are treated as immutable.
+- **Idempotent** — re-running an update adds nothing; the manifest survives across
+  processes so dedupe is durable.
+- **Isolated** — one failing or no-data review never aborts the batch.
+
+This was verified against a copy of the **real 595-file** dataset: feeding a mix
+of existing + new reviews appended only the new ones, left all 595 originals
+byte-identical, and a re-run added zero.
+
+### Running the update
+
+```bash
+# Discover-only (safe; writes nothing) — see what's new:
+python -m beast update --pairwise70 /path/to/Pairwise70 --since 2025-06-01
+
+# Append new reviews using the real extractor, then commit (and push):
+python -m beast update --pairwise70 /path/to/Pairwise70 --since 2025-06-01 \
+  --extractor-cmd "python bulk_downloader.py --doi {doi} --out {out}" \
+  --extractor-cwd /path/to/CochraneDataExtractor \
+  --commit --push
+```
+
+`beast run` and `beast loop` accept the same `--pairwise70 …` flags and perform
+the update step **before** trend-tracking, so a single scheduled command keeps the
+dataset current *and* tracks the trends. The placeholders `{doi}`, `{review_id}`
+and `{out}` are filled per review; the command must write a Cochrane data-rows CSV
+to `{out}`.
+
+> Note: Beast ships the *machinery* to grow Pairwise70 safely. It only appends
+> real data from the real extractor — it does not fabricate datasets, so this
+> repository does not push synthetic entries to Pairwise70.
+
+---
+
 ## Architecture
 
 ```
@@ -75,16 +145,26 @@ beast/
   config.py          Home dir, paths, topics.json.
   logging_setup.py   Console + rotating file logging.
   cli.py             `beast` command-line interface.
+  pairwise70_repo.py Append-only, idempotent writer for the Pairwise70 dataset
+                     (no dupes / no clobber / no data loss).
+  updater.py         Orchestrate the auto-update: discover -> dedupe -> extract ->
+                     append -> commit/push.
   sources/
     base.py          Source ABC + TopicSpec (fail-closed contract).
     pairwise70.py    Offline real Cochrane data (CSV or .rda), as_of_year cumulative.
     europepmc.py     Live PubMed/Europe PMC search (RCTs); abstract effect parser.
-tests/               63 offline tests (synthetic + real sample vs metafor gold).
+  ingest/
+    base.py          CochraneFeed + StudyExtractor ABCs, ReviewRef, DOI->id.
+    cochrane.py      Crossref CDSR feed + ProcessExtractor (reuses the real
+                     cochrane-data-extractor pipeline). Both mockable.
+tests/               88 offline tests (synthetic + real sample vs metafor gold;
+                     updater safety vs the real 595-file structure).
 ```
 
-**Data flow per run:** `source.fetch(topic) → compute_effects → meta_analyze →
-compute_snapshot → store.add_snapshot (idempotent) → diff_snapshots → store.add_changes
-→ report`.
+**Data flow per run:** *(update)* `feed.list_reviews → dedupe vs dataset →
+extractor.extract → repo.add_dataset (append-only) → commit/push`, then *(track)*
+`source.fetch(topic) → compute_effects → meta_analyze → compute_snapshot →
+store.add_snapshot (idempotent) → diff_snapshots → store.add_changes → report`.
 
 ### Data sources
 
@@ -152,9 +232,15 @@ The loop is fail-closed: an error in one run is logged and the loop continues.
 **2. cron (Linux/macOS):**
 
 ```cron
-# every day at 03:00 — re-fetch, snapshot, diff, regenerate dashboards
-0 3 * * *  cd /path/to/Beast && /usr/bin/python -m beast run >> beast_data/cron.log 2>&1
+# every day at 03:00 — update Pairwise70 with new reviews, then snapshot/diff/dashboards
+0 3 * * *  cd /path/to/Beast && /usr/bin/python -m beast run \
+  --pairwise70 /path/to/Pairwise70 --since 2025-01-01 \
+  --extractor-cmd "python bulk_downloader.py --doi {doi} --out {out}" \
+  --extractor-cwd /path/to/CochraneDataExtractor --commit --push \
+  >> beast_data/cron.log 2>&1
 ```
+
+(Omit the `--pairwise70 …` flags to only do trend-tracking.)
 
 **3. Windows Task Scheduler:**
 
@@ -209,7 +295,8 @@ Then schedule `beast run` — each run appends to the trend and flags what chang
 | `beast init` | Create home dir + a real starter topic |
 | `beast add …` | Add/update a tracked topic |
 | `beast list` | List topics and their latest pooled state |
-| `beast run` | Fetch, recompute, snapshot and diff every topic once |
+| `beast update --pairwise70 …` | Auto-update the Pairwise70 dataset with new Cochrane reviews |
+| `beast run [--pairwise70 …]` | (Optionally update Pairwise70 then) fetch, recompute, snapshot and diff every topic |
 | `beast backfill --topic ID --years …` | Reconstruct a topic's historical trend (Pairwise70) |
 | `beast loop --interval N` | Self-running scheduler |
 | `beast history --topic ID` | Print a topic's trend |
@@ -238,7 +325,7 @@ standard guidance.
 
 ```bash
 pip install pytest
-python -m pytest            # 63 tests, fully offline, ~5s
+python -m pytest            # 88 tests, fully offline, ~5s
 ```
 
 ---

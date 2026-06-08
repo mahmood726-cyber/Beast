@@ -52,8 +52,23 @@ def _num(v) -> Optional[float]:
     return None if f != f else f
 
 
+# Each Trial field may arrive under a tidy name or its Cochrane (RevMan) name.
+_FIELD_ALIASES = {
+    "e_events": ("e_events", "Experimental.cases"),
+    "e_n": ("e_n", "Experimental.N"),
+    "c_events": ("c_events", "Control.cases"),
+    "c_n": ("c_n", "Control.N"),
+    "e_mean": ("e_mean", "Experimental.mean"),
+    "e_sd": ("e_sd", "Experimental.SD"),
+    "c_mean": ("c_mean", "Control.mean"),
+    "c_sd": ("c_sd", "Control.SD"),
+    "yi": ("yi", "GIV.Mean"),
+    "sei": ("sei", "GIV.SE"),
+}
+
+
 def _row_to_trial(row: dict) -> Optional[Trial]:
-    """Build a Trial from a tidy row dict, choosing whatever data shape is present."""
+    """Build a Trial from a row dict using tidy *or* Cochrane column names."""
     study = (row.get("study") or row.get("Study") or "").strip()
     if not study:
         return None
@@ -61,7 +76,11 @@ def _row_to_trial(row: dict) -> Optional[Trial]:
     t = Trial(study=study, year=int(year) if year is not None else None)
 
     def g(key):  # value by tidy or Cochrane column name
-        return _num(row.get(key))
+        for name in _FIELD_ALIASES[key]:
+            v = _num(row.get(name))
+            if v is not None:
+                return v
+        return None
 
     t.e_events, t.e_n = g("e_events"), g("e_n")
     t.c_events, t.c_n = g("c_events"), g("c_n")

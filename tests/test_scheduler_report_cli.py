@@ -95,3 +95,35 @@ def test_cli_run_idempotent(tmp_home):
     assert main(["--home", tmp_home, "run", "--no-log-file", "--no-report"]) == 0
     # second run: source unchanged -> exit 0, no crash
     assert main(["--home", tmp_home, "run", "--no-log-file", "--no-report"]) == 0
+
+
+def test_cli_update_discover_only(tmp_home, tmp_path, monkeypatch, capsys):
+    """`beast update` in discover-only mode lists new ids and writes nothing."""
+    # Seed a tiny fake Pairwise70 dataset.
+    pw = tmp_path / "Pairwise70"
+    (pw / "data").mkdir(parents=True)
+    (pw / "data" / "CD000028_pub4_data.rda").write_text("ORIGINAL", encoding="utf-8")
+
+    # Mock the Crossref feed so no network is touched.
+    import beast.cli as cli
+    from beast.ingest.base import ReviewRef
+    from beast.ingest.cochrane import CrossrefCochraneFeed
+
+    def fake_list(self, since=None):
+        return [ReviewRef.from_doi("10.1002/14651858.CD000028.pub4"),   # existing
+                ReviewRef.from_doi("10.1002/14651858.CD900900.pub1")]   # new
+
+    monkeypatch.setattr(CrossrefCochraneFeed, "list_reviews", fake_list)
+    rc = cli.main(["--home", tmp_home, "update", "--pairwise70", str(pw), "--no-log-file"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "discover-only" in out
+    assert "CD900900_pub1" in out          # the new review is surfaced
+    # Discover-only must not write any dataset files.
+    assert not (pw / "beast_manifest.json").exists()
+
+
+def test_cli_update_requires_pairwise70(tmp_home):
+    # --pairwise70 is required for `update`; argparse exits (SystemExit) without it.
+    with pytest.raises(SystemExit):
+        main(["--home", tmp_home, "update", "--no-log-file"])

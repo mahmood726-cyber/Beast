@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import sys
 from typing import Optional
@@ -106,9 +107,65 @@ def cmd_list(args) -> int:
     return 0
 
 
+def _run_update_step(args) -> Optional[object]:
+    """Run the Pairwise70 auto-update if --pairwise70 is configured.
+
+    With an extractor command it appends new datasets; without one it runs in
+    safe discover-only mode (lists what is new, writes nothing). Returns the
+    UpdateReport (or a discover-only summary dict), or None if not configured.
+    """
+    if not getattr(args, "pairwise70", None):
+        return None
+    from beast.ingest.cochrane import CrossrefCochraneFeed, ProcessExtractor
+    from beast.pairwise70_repo import Pairwise70Repo
+    from beast.updater import commit_and_push, update_pairwise70
+
+    repo = Pairwise70Repo(args.pairwise70)
+    feed = CrossrefCochraneFeed()
+    ts = utc_now_iso()
+
+    if not getattr(args, "extractor_cmd", None):
+        # Discover-only: never writes. Reports new ids for the operator.
+        refs = feed.list_reviews(since=getattr(args, "since", None))
+        new = [r for r in refs if not repo.has(r.id)]
+        print(f"discover-only: {len(refs)} review(s) in feed, {len(new)} new, "
+              f"{repo.count_existing_rda()} already in dataset "
+              f"(pass --extractor-cmd to append them)")
+        for r in new[: getattr(args, "limit", None) or 20]:
+            print(f"  NEW {r.id:<16} {r.pub_date or '????':<10} {r.title[:70]}")
+        return {"discover_only": True, "new": [r.id for r in new]}
+
+    extractor = ProcessExtractor(shlex.split(args.extractor_cmd), cwd=getattr(args, "extractor_cwd", None))
+    report = update_pairwise70(repo, feed, extractor, since=getattr(args, "since", None),
+                               limit=getattr(args, "limit", None), timestamp=ts)
+    print(f"pairwise70 update: +{report.n_added} added, {report.n_skipped} skipped, "
+          f"{report.n_no_data} no-data, {report.n_failed} failed")
+    if report.n_added and (getattr(args, "commit", False) or getattr(args, "push", False)):
+        msg = commit_and_push(repo, report, push=getattr(args, "push", False))
+        if msg:
+            print(f"  committed{' + pushed' if getattr(args, 'push', False) else ''}: {msg}")
+    return report
+
+
+def cmd_update(args) -> int:
+    p = paths(args.home).ensure()
+    configure_logging(args.log_level, None if args.no_log_file else p.log)
+    if not args.pairwise70:
+        print("error: --pairwise70 PATH is required (a local clone of the Pairwise70 dataset)")
+        return 1
+    _run_update_step(args)
+    return 0
+
+
 def cmd_run(args) -> int:
     p = paths(args.home).ensure()
     configure_logging(args.log_level, None if args.no_log_file else p.log)
+    # Living-updater core: refresh the Pairwise70 dataset first (if configured),
+    # so trend-tracking runs on the most current evidence.
+    try:
+        _run_update_step(args)
+    except Exception as exc:  # noqa: BLE001 - update must not block tracking
+        print(f"  ! pairwise70 update step failed (continuing to track): {exc}")
     topics = load_topics(p.topics) if os.path.exists(p.topics) else []
     if not topics:
         print("no topics to run; add some with `beast add` or `beast init`.")
@@ -157,6 +214,10 @@ def cmd_loop(args) -> int:
     from beast.scheduler import run_loop
 
     def one_run():
+        try:
+            _run_update_step(args)
+        except Exception as exc:  # noqa: BLE001 - update must not kill the loop
+            print(f"  ! pairwise70 update step failed (continuing to track): {exc}")
         topics = load_topics(p.topics) if os.path.exists(p.topics) else []
         with _store(p) as store:
             rep = run_once(store, topics)
@@ -207,6 +268,18 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--no-log-file", action="store_true")
         sp.add_argument("--no-report", action="store_true", help="skip writing JSON/HTML reports")
 
+    def update_flags(sp, required=False):
+        sp.add_argument("--pairwise70", required=required,
+                        help="path to a local clone of the Pairwise70 dataset to auto-update")
+        sp.add_argument("--since", help="only consider reviews published on/after this date (YYYY-MM-DD)")
+        sp.add_argument("--limit", type=int, help="cap how many new reviews to append per run")
+        sp.add_argument("--extractor-cmd",
+                        help="command to extract a review's data-rows CSV; placeholders "
+                             "{doi} {review_id} {out}. Omit for safe discover-only mode.")
+        sp.add_argument("--extractor-cwd", help="working dir for the extractor command")
+        sp.add_argument("--commit", action="store_true", help="git-commit appended datasets")
+        sp.add_argument("--push", action="store_true", help="git push appended datasets (implies commit)")
+
     sp = sub.add_parser("init", help="create home dir + starter topic"); sp.set_defaults(func=cmd_init)
     sp.add_argument("--force", action="store_true")
 
@@ -220,7 +293,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("list", help="list tracked topics"); sp.set_defaults(func=cmd_list)
 
-    sp = sub.add_parser("run", help="run all topics once"); common(sp); sp.set_defaults(func=cmd_run)
+    sp = sub.add_parser("update", help="auto-update the Pairwise70 dataset with new Cochrane reviews")
+    common(sp); update_flags(sp, required=True); sp.set_defaults(func=cmd_update)
+
+    sp = sub.add_parser("run", help="(optionally update Pairwise70 then) run all topics once")
+    common(sp); update_flags(sp); sp.set_defaults(func=cmd_run)
 
     sp = sub.add_parser("backfill", help="reconstruct a topic's historical trend")
     common(sp); sp.set_defaults(func=cmd_backfill)
@@ -228,7 +305,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--start", type=int, default=1970); sp.add_argument("--end", type=int, default=2025)
     sp.add_argument("--years", help="explicit comma list, e.g. 1986,1991,1993 (overrides start/end)")
 
-    sp = sub.add_parser("loop", help="self-running scheduler"); common(sp); sp.set_defaults(func=cmd_loop)
+    sp = sub.add_parser("loop", help="self-running scheduler (update + track each tick)")
+    common(sp); update_flags(sp); sp.set_defaults(func=cmd_loop)
     sp.add_argument("--interval", type=float, default=86400.0, help="seconds between runs (default 1 day)")
     sp.add_argument("--max-runs", type=int, default=None)
 

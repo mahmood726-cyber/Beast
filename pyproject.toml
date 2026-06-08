@@ -22,7 +22,7 @@ dev = ["pytest>=7.0", "pyreadr>=0.5", "requests>=2.28"]
 beast = "beast.cli:main"
 
 [tool.setuptools]
-packages = ["beast", "beast.sources"]
+packages = ["beast", "beast.sources", "beast.ingest"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
