@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "beast-surveillance"
+version = "0.1.0"
+description = "Self-running surveillance of how meta-analysis evidence evolves over time"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Mahmood" }]
+keywords = ["meta-analysis", "living-evidence", "surveillance", "heterogeneity", "cochrane"]
+dependencies = ["numpy>=1.24", "scipy>=1.10"]
+
+[project.optional-dependencies]
+rda = ["pyreadr>=0.5"]
+web = ["requests>=2.28"]
+dev = ["pytest>=7.0", "pyreadr>=0.5", "requests>=2.28"]
+
+[project.scripts]
+beast = "beast.cli:main"
+
+[tool.setuptools]
+packages = ["beast", "beast.sources"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

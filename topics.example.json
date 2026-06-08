@@ -1,0 +1,31 @@
+{
+  "topics": [
+    {
+      "id": "htn-elderly-mortality",
+      "title": "Antihypertensive therapy in the elderly: all-cause mortality (60-79y)",
+      "source": "pairwise70",
+      "measure": "OR",
+      "method": "REML",
+      "params": { "csv": "tests/fixtures/sample_pairwise70.csv" },
+      "notes": "Real Cochrane CD000028 trial-level data; demonstrates a significance flip between 1986 and 1991 as trials accumulated."
+    },
+    {
+      "id": "example-rda-topic",
+      "title": "Example: a Pairwise70 .rda review, one analysis/subgroup",
+      "source": "pairwise70",
+      "measure": "OR",
+      "method": "REML",
+      "params": { "rda": "Pairwise70/data/CD000028_pub4_data.rda", "analysis_number": 1, "subgroup": "60 to 79 years old" },
+      "notes": "Needs pyreadr and a local clone of the Pairwise70 dataset."
+    },
+    {
+      "id": "example-live-topic",
+      "title": "Example: live Europe PMC surveillance of an RCT topic",
+      "source": "europepmc",
+      "measure": "GEN",
+      "method": "REML",
+      "params": { "query": "empagliflozin AND heart failure AND mortality", "min_year": 2015 },
+      "notes": "Needs requests; fetches current RCTs and pools any abstract-reported effect with a 95% CI."
+    }
+  ]
+}
