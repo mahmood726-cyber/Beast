@@ -21,7 +21,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Optional
 
-from beast.ingest.base import CochraneFeed, NoDataError, ReviewRef, StudyExtractor
+from beast.ingest.base import CochraneFeed, NoDataError, StudyExtractor
 from beast.pairwise70_repo import Pairwise70Repo
 
 log = logging.getLogger("beast.updater")

@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Optional
 
 from beast.effects import compute_effects, is_log_scale

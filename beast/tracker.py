@@ -17,9 +17,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
-from beast.config import Paths
 from beast.diff import DiffThresholds, diff_snapshots
-from beast.snapshot import Snapshot, compute_snapshot
+from beast.snapshot import compute_snapshot
 from beast.sources.base import Source, TopicSpec, get_source
 from beast.store import BeastStore
 

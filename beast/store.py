@@ -10,10 +10,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from contextlib import closing
 from typing import Optional
 
-from beast.diff import Change, SnapshotDiff
+from beast.diff import SnapshotDiff
 from beast.snapshot import Snapshot
 from beast.sources.base import TopicSpec
 

@@ -22,7 +22,7 @@ by the caller (see :mod:`beast.effects`); this module is scale-agnostic.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Sequence
 
 import numpy as np
