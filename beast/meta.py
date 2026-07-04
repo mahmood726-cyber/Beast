@@ -293,8 +293,16 @@ def meta_analyze(
     ci_high = mu + crit * se_ci
 
     # Test of the pooled effect against the null (0 on the analysis scale).
-    z = mu / se_mu
-    p_value = float(2 * stats.norm.sf(abs(z)))
+    # Under Knapp-Hartung the test statistic and p-value must use the SAME
+    # inflated SE and t reference distribution as the CI, otherwise the reported
+    # p_value can contradict `significant` (which is CI-based). Without knha we
+    # use the Wald z / normal test.
+    if knha:
+        z = mu / se_ci
+        p_value = float(2 * stats.t.sf(abs(z), df))
+    else:
+        z = mu / se_mu
+        p_value = float(2 * stats.norm.sf(abs(z)))
 
     # Prediction interval: t_{k-1} per Cochrane Handbook v6.5. Needs k >= 2.
     pi_low = pi_high = None

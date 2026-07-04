@@ -69,6 +69,18 @@ def test_knha_never_narrower_than_wald(gold):
     assert (knha.ci_high - knha.ci_low) >= (wald.ci_high - wald.ci_low) - 1e-9
 
 
+def test_knha_pvalue_consistent_with_ci(gold):
+    # Under Knapp-Hartung the p-value must use the same inflated SE and t
+    # reference as the CI, so p_value < alpha iff the CI excludes the null.
+    g = gold["rma_heterogeneous"]
+    r = meta_analyze(g["yi"], g["vi"], method="REML", knha=True, alpha=0.05)
+    assert (r.p_value < 0.05) == r.significant
+    # The knha p-value (t-based, inflated SE) is more conservative (larger) than
+    # the plain Wald normal p-value on the same data.
+    wald = meta_analyze(g["yi"], g["vi"], method="REML")
+    assert r.p_value >= wald.p_value
+
+
 def test_prediction_interval_is_cochrane_t_k_minus_1(gold):
     g = gold["rma_heterogeneous"]
     r = meta_analyze(g["yi"], g["vi"], method="REML", log_scale=True)
