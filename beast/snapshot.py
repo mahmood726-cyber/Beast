@@ -111,7 +111,12 @@ def compute_snapshot(
     n_total = 0
     have_n = False
     for t in used:
-        for n in (t.e_n, t.c_n):
+        # Mirror effects.has_continuous: arm sizes may live in the *_cont
+        # fallback fields for continuous trials, so honour those too or the
+        # participant total silently undercounts (or reads as None).
+        n_e = t.e_n if t.e_n is not None else t.e_n_cont
+        n_c = t.c_n if t.c_n is not None else t.c_n_cont
+        for n in (n_e, n_c):
             if n is not None:
                 n_total += int(n)
                 have_n = True

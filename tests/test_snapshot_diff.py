@@ -28,6 +28,21 @@ def test_compute_snapshot_basic_fields():
     assert snap.content_hash
 
 
+def test_n_total_counts_continuous_arm_fallback_fields():
+    # Continuous trials may store arm sizes in the *_cont fallback fields.
+    # n_total must honour those, else the participant count silently undercounts.
+    topic = TopicSpec(id="c", title="c", source="pairwise70", measure="MD", method="REML")
+    trials = [
+        Trial(f"s{i}", year=2000 + i,
+              e_mean=10.0, e_sd=2.0, c_mean=12.0, c_sd=2.0,
+              e_n_cont=30, c_n_cont=25)
+        for i in range(3)
+    ]
+    snap = compute_snapshot(topic, trials, "2020-01-01T00:00:00Z")
+    assert snap.k == 3
+    assert snap.n_total == 3 * (30 + 25)
+
+
 def test_content_hash_is_stable_and_input_sensitive():
     a = compute_snapshot(_topic(), _bin_trials(5), "2020-01-01T00:00:00Z")
     b = compute_snapshot(_topic(), _bin_trials(5), "2099-12-31T00:00:00Z")  # different ts
